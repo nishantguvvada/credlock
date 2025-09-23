@@ -1,6 +1,8 @@
 use actix_web::{App, HttpResponse, HttpServer, Responder, get, post, web};
 use actix_web_httpauth::extractors::bearer::BearerAuth;
+use chrono::{Duration, Utc};
 use dotenv::dotenv;
+use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use mongodb::{
     Client, Collection,
     bson::{doc, oid::ObjectId},
@@ -11,6 +13,12 @@ use std::env;
 use std::error::Error;
 use tokio;
 use uuid::Uuid;
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Claims {
+    sub: String, // Subject (e.g., user ID)
+    exp: usize,  // Expiration timestamp
+}
 
 #[derive(Debug, Deserialize, Serialize)]
 struct Credentials {
@@ -35,16 +43,35 @@ async fn default() -> impl Responder {
 #[post("/users")]
 async fn create_user(user: web::Json<Users>) -> impl Responder {
     let new_user = user.into_inner();
+    let secret = env::var("JWT_SECRET").expect("You must set JWT_SECRET environment variable!");
 
-    let added_user = add_user(new_user).await;
+    let added_user = add_user(&new_user).await;
     match added_user {
-        Ok(value) => match value.inserted_id.as_object_id() {
-            Some(id) => {
-                HttpResponse::Ok().json(json!({"response":"User created!", "user_id": id.to_hex()}))
+        Ok(value) => {
+            let claim = Claims {
+                sub: new_user.user_email,
+                exp: (Utc::now() + Duration::hours(24)).timestamp() as usize,
+            };
+            let token = match encode(
+                &Header::default(),
+                &claim,
+                &EncodingKey::from_secret(secret.as_ref()),
+            ) {
+                Ok(t) => t,
+                Err(e) => {
+                    return HttpResponse::InternalServerError()
+                        .json(json!({"error": format!("Token encoding failed: {}", e)}));
+                }
+            };
+
+            match value.inserted_id.as_object_id() {
+                Some(id) => HttpResponse::Ok().json(
+                    json!({"response":"User created!", "user_id": id.to_hex(), "token": token}),
+                ),
+                None => HttpResponse::NotFound()
+                    .json(json!({"error": "Failed to get inserted_id as ObjectId"})),
             }
-            None => HttpResponse::NotFound()
-                .json(json!({"error": "Failed to get inserted_id as ObjectId"})),
-        },
+        }
         Err(error) => HttpResponse::InternalServerError()
             .json(json!({"error": format!("Failed to create user: {}", error)})),
     }
@@ -58,13 +85,29 @@ async fn create_credentials(
     let token = auth.token();
     println!("Received bearer token: {}", token);
 
+    let secret = env::var("JWT_SECRET").expect("You must set JWT_SECRET environment variable!");
+
+    match decode::<Claims>(
+        token,
+        &DecodingKey::from_secret(secret.as_ref()),
+        &Validation::default(),
+    ) {
+        Ok(token_data) => {
+            let claims = token_data.claims;
+            println!("Hello user: {}", claims.sub);
+        }
+        Err(e) => {
+            eprintln!("Token decoding failed: {}", e);
+            return HttpResponse::Unauthorized()
+                .json(json!({"error": format!("Token decoding failed: {}", e)}));
+        }
+    }
+
     let new_credentials = credentials.into_inner();
     HttpResponse::Ok().json(json!({"response":new_credentials}))
 }
 
 async fn connection() -> mongodb::Client {
-    dotenv().ok();
-
     let mongo_uri = env::var("MONGO_URI").expect("You must set MONGO_URI environment variable!");
 
     let client = Client::with_uri_str(mongo_uri).await;
@@ -90,7 +133,7 @@ async fn add_credentials(
 }
 
 async fn add_user(
-    user_details: Users,
+    user_details: &Users,
 ) -> Result<mongodb::results::InsertOneResult, mongodb::error::Error> {
     let client = connection().await;
 
@@ -103,6 +146,7 @@ async fn add_user(
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
+    dotenv().ok();
     HttpServer::new(|| {
         App::new()
             .service(default)
