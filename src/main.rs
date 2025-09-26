@@ -5,7 +5,7 @@ use dotenv::dotenv;
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use mongodb::{
     Client, Collection,
-    bson::{doc, oid::ObjectId},
+    bson::{Document, doc, oid::ObjectId},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -44,6 +44,11 @@ async fn default() -> impl Responder {
 async fn create_user(user: web::Json<Users>) -> impl Responder {
     let new_user = user.into_inner();
     let secret = env::var("JWT_SECRET").expect("You must set JWT_SECRET environment variable!");
+
+    if let Ok(_) = existing_user(&new_user).await {
+        return HttpResponse::InternalServerError()
+            .json(json!({"error": format!("Already an existing user, try signing in!")}));
+    }
 
     let added_user = add_user(&new_user).await;
     match added_user {
@@ -118,6 +123,18 @@ async fn connection() -> mongodb::Client {
     };
 
     return result;
+}
+
+async fn existing_user(user_details: &Users) -> Result<Option<Credentials>, mongodb::error::Error> {
+    let client = connection().await;
+
+    let coll: Collection<Credentials> = client.database("credlock").collection("credentials");
+
+    let res = coll
+        .find_one(doc! {"user_email": &user_details.user_email})
+        .await;
+
+    return res;
 }
 
 async fn add_credentials(
