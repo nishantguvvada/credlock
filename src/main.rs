@@ -2,16 +2,11 @@ use actix_web::{App, HttpResponse, HttpServer, Responder, get, post, web};
 use actix_web_httpauth::extractors::bearer::BearerAuth;
 use chrono::{Duration, Utc};
 use dotenv::dotenv;
-use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
-use mongodb::{
-    Client, Collection,
-    bson::{Document, doc, oid::ObjectId},
-};
+use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
+use mongodb::{Client, Collection, bson::doc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::env;
-use std::error::Error;
-use tokio;
 use uuid::Uuid;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -99,7 +94,7 @@ async fn create_credentials(
     ) {
         Ok(token_data) => {
             let claims = token_data.claims;
-            println!("Hello user: {}", claims.sub);
+            println!("Token - User Payload : {}", claims.sub);
         }
         Err(e) => {
             eprintln!("Token decoding failed: {}", e);
@@ -109,7 +104,26 @@ async fn create_credentials(
     }
 
     let new_credentials = credentials.into_inner();
-    HttpResponse::Ok().json(json!({"response":new_credentials}))
+
+    let added_credentials = add_credentials(&new_credentials).await;
+    match added_credentials {
+        Ok(value) => {
+            match value.inserted_id.as_object_id() {
+                Some(id) => {
+                    return HttpResponse::Ok()
+                        .json(json!({"response":"Credentials stored!", "job_id": id.to_hex()}));
+                }
+                None => {
+                    return HttpResponse::NotFound()
+                        .json(json!({"error": "Failed to get inserted_id as ObjectId"}));
+                }
+            };
+        }
+        Err(e) => {
+            return HttpResponse::InternalServerError()
+                .json(json!({"error": format!("Credentials upload failed: {}", e)}));
+        }
+    }
 }
 
 async fn connection() -> mongodb::Client {
@@ -138,7 +152,7 @@ async fn existing_user(user_details: &Users) -> Result<Option<Credentials>, mong
 }
 
 async fn add_credentials(
-    user_input: Credentials,
+    user_input: &Credentials,
 ) -> Result<mongodb::results::InsertOneResult, mongodb::error::Error> {
     let client = connection().await;
 
