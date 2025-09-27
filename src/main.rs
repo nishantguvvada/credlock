@@ -40,7 +40,10 @@ async fn create_user(user: web::Json<Users>) -> impl Responder {
     let new_user = user.into_inner();
     let secret = env::var("JWT_SECRET").expect("You must set JWT_SECRET environment variable!");
 
-    if let Ok(_) = existing_user(&new_user).await {
+    println!("user email: {}", &new_user.user_email);
+
+    if let Ok(Some(user)) = existing_user(&new_user.user_email).await {
+        println!("response: {:?}", user);
         return HttpResponse::InternalServerError()
             .json(json!({"error": format!("Already an existing user, try signing in!")}));
     }
@@ -87,7 +90,7 @@ async fn create_credentials(
 
     let secret = env::var("JWT_SECRET").expect("You must set JWT_SECRET environment variable!");
 
-    match decode::<Claims>(
+    let token = match decode::<Claims>(
         token,
         &DecodingKey::from_secret(secret.as_ref()),
         &Validation::default(),
@@ -95,12 +98,18 @@ async fn create_credentials(
         Ok(token_data) => {
             let claims = token_data.claims;
             println!("Token - User Payload : {}", claims.sub);
+            claims.sub
         }
         Err(e) => {
             eprintln!("Token decoding failed: {}", e);
             return HttpResponse::Unauthorized()
                 .json(json!({"error": format!("Token decoding failed: {}", e)}));
         }
+    };
+
+    if let Ok(None) = existing_user(&token).await {
+        return HttpResponse::InternalServerError()
+            .json(json!({"error": format!("Incorrect Token!")}));
     }
 
     let new_credentials = credentials.into_inner();
@@ -139,14 +148,12 @@ async fn connection() -> mongodb::Client {
     return result;
 }
 
-async fn existing_user(user_details: &Users) -> Result<Option<Credentials>, mongodb::error::Error> {
+async fn existing_user(user_details: &String) -> Result<Option<Users>, mongodb::error::Error> {
     let client = connection().await;
 
-    let coll: Collection<Credentials> = client.database("credlock").collection("credentials");
+    let coll: Collection<Users> = client.database("credlock").collection("users");
 
-    let res = coll
-        .find_one(doc! {"user_email": &user_details.user_email})
-        .await;
+    let res = coll.find_one(doc! {"user_email": &user_details}).await;
 
     return res;
 }
